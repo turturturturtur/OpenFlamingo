@@ -1,0 +1,17 @@
+# config/dataset/vqav2.yaml
+
+# 数据集构建器的名称，与注册表中的键对应
+name: VQAv2 
+
+# 数据集的根目录
+vqa_dir: data/vqav2
+coco_dir: data/coco
+
+# 不同模式下对应的文件名
+question_files:
+  val: v2_OpenEnded_mscoco_val2014_questions.json
+  train: v2_OpenEnded_mscoco_train2014_questions.json
+
+annotation_files:
+  val: v2_mscoco_val2014_annotations.json
+  train: v2_mscoco_train2014_annotations.json

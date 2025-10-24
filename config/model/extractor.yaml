@@ -1,0 +1,5 @@
+num_heads: 8
+dim_attn1: 1024
+dim_attn2: 512
+hidden_layer: 256
+output_dim: 128

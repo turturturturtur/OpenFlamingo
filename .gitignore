@@ -1,0 +1,90 @@
+# ------------------------------
+# Python cache / build artifacts
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# ------------------------------
+# Environment / virtualenv
+# ------------------------------
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+environment.yaml
+*.lock
+
+# ------------------------------
+# IDE / editor settings
+# ------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# Checkpoints / experiments
+# ------------------------------
+runs/
+checkpoints/
+outputs/
+logs/
+wandb/
+tensorboard/
+*.pth
+*.pt
+*.ckpt
+*.bin
+
+# ------------------------------
+# Temporary / generated data
+# ------------------------------
+tmp/
+temp/
+cache/
+*.tar
+*.zip
+*.gz
+*.pkl
+*.npy
+*.npz
+
+# ------------------------------
+# Symlinked or large data dirs
+# ------------------------------
+data/
+datasets/
+raw_data/
+external_data/
+local_data/
+
+# ------------------------------
+# Config / personal / secret
+# ------------------------------
+config/local_*.yaml
+config/private/
+*.secret
+*.pem
+*.key
+
+# ------------------------------
+# OS specific / Jupyter / misc
+# ------------------------------
+.ipynb_checkpoints/
+*.ipynb_convert/
+*.out
+*.err
+*.tmp

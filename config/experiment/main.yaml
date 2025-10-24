@@ -1,0 +1,13 @@
+dataset: VQAv2
+model: openflamingo
+
+# 填写准确率threshold
+margin: 0.1
+
+# 这个是关于用不用我们的提取器
+extractor: true
+
+# Loss的设置
+loss_name: triplet_loss
+loss_param: 
+  margin: 0.0
