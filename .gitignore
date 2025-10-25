@@ -20,7 +20,6 @@ env/
 venv/
 ENV/
 env.bak/
-environment.yaml
 *.lock
 
 # ------------------------------
