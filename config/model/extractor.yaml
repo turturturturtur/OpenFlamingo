@@ -1,3 +1,5 @@
+vis_dim: 768
+txt_dim: 2048
 num_heads: 8
 dim_attn1: 1024
 dim_attn2: 512

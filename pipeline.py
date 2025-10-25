@@ -7,6 +7,7 @@ import dataset
 import argparse
 import warnings
 import tqdm
+import numpy as np
 from torch.utils.data import DataLoader, Subset
 from utils import create_model
 from PIL import Image
@@ -14,7 +15,7 @@ from pathlib import Path
 from torch.optim import AdamW
 from utils import read_cfg, set_seeds, create_dataset, create_loss, FeatureExtractorTrainer, TripletDataset
 from open_flamingo import create_model_and_transforms
-from sampler import ZeroshotSampler, OneShotSampler
+from sampler import ZeroshotSampler, OneShotSampler, TopKSampler
 from transformers import logging
 
 
@@ -51,102 +52,57 @@ def main(args):
     loss_fn = create_loss(exp_cfg.get("loss_name"), **exp_cfg.get("loss_param"))
 
     # 初始化数据集
+    print(f"--- 正在构建数据集 ---")
     dataset = create_dataset(exp_cfg.get("dataset"))
     dst_train = dataset.build(mode='train', image_processor=image_processor)
     dst_val = dataset.build(mode='val', image_processor=image_processor)
 
-    # # 计算0-shot
-    # zeroshot_sampler = ZeroshotSampler(model, image_processor, tokenizer, device)
-    # zeroshot_scores = zeroshot_sampler.calculate_scores(dst_train)
-
-    # # 计算1-shot
-    # oneshot_sampler = OneShotSampler(model, image_processor, tokenizer, device)
-    # sample_pools = oneshot_sampler.find_samples(dst_train, zeroshot_scores, margin=margin)
-
-
-
-
-    import open_clip
-    vision_encoder, _, image_processor = open_clip.create_model_and_transforms(
-        "ViT-L-14", pretrained="openai"
-    )
-    vision_encoder.to(device)
-    inputs = dst_train[0]['image'].unsqueeze(0).to(device)
-    vision_embed = vision_encoder.encode_image(inputs, normalize=True)
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    # 加载 MPT 语言模型和 tokenizer
-    tok = AutoTokenizer.from_pretrained(
-        "anas-awadalla/mpt-1b-redpajama-200b",
-        trust_remote_code=True,
-    )
-    if tok.pad_token is None:
-        tok.add_special_tokens({"pad_token": "<PAD>"})
-
-    lm = AutoModelForCausalLM.from_pretrained(
-        "anas-awadalla/mpt-1b-redpajama-200b",
-        trust_remote_code=True,
-    ).to(device)
-    lm.resize_token_embeddings(len(tok))
-
-    # 输入文本
-    text = dst_train[0]["gt_answer"]
-    batch = tok(text, return_tensors="pt").to(device)
-
-    # 前向传播，输出最后一层 hidden states
-    with torch.no_grad():
-        out = lm(**batch, output_hidden_states=True, return_dict=True)
-
-    # 最后一层每个 token 的嵌入
-    embeds = out.last_hidden_state      # shape [B, T, hidden_dim]
-    print(embeds.shape)                 # 例如 [1, 12, 2048] 对 MPT-1B
-
-    # 如果你只想要句向量（整句表示）
-    lengths = batch["attention_mask"].sum(dim=1)
-    sent_emb = embeds[torch.arange(embeds.size(0)), lengths - 1]   # [B, hidden_dim]
-
-
-    # 为了演示，我们只对验证集的前10个样本进行完整的 one-shot 挖掘
-    # 这将进行 10 (查询) * 9 (示例) = 90 次 one-shot 推理
-    sample_indices = range(10) 
-    val_subset = Subset(dst_val, sample_indices)
-    print(f"--- 准备进行 One-shot 样本挖掘，使用验证集的 {len(val_subset)} 个样本 ---")
-
-    # 步骤 1: 计算这些样本的 0-shot 分数作为基准
+    # 计算0-shot
+    print(f"--- 计算训练集的 0-shot 分数 ---")
     zeroshot_sampler = ZeroshotSampler(model, image_processor, tokenizer, device)
-    # 注意：我们只在子集上计算0-shot分数
-    zeroshot_scores = zeroshot_sampler.calculate_scores(val_subset, batch_size=4) 
+    zeroshot_scores = zeroshot_sampler.calculate_scores(dst_train)
 
-    # 步骤 2: 初始化 OneShotSampler 并开始挖掘
+    # 计算1-shot
+    print(f"--- 挖掘训练集的 One-shot 样本 ---")
     oneshot_sampler = OneShotSampler(model, image_processor, tokenizer, device)
-    # 将子集和对应的0-shot分数传入
-    sample_pools = oneshot_sampler.find_samples(val_subset, zeroshot_scores, margin=margin)
-
-    # 步骤 3: 打印结果
-    print("\n--- 样本挖掘结果 ---")
-    for q_id, pools in sample_pools.items():
-        print(f"查询 ID: {q_id}")
-        print(f"  - 找到的正样本: {pools['positive']}")
-        print(f"  - 找到的负样本: {pools['negative']}")
-        print("-" * 20)
+    sample_pools = oneshot_sampler.find_samples(dst_train, zeroshot_scores, margin=margin)
 
     # 训练提取器
-    # triplet_dataset = TripletDataset(original_dataset=val_subset, sample_pools=sample_pools)
-    # optimizer = AdamW(extractor.parameters(), lr=exp_cfg.get("lr", 1e-4))
-    # trainer = FeatureExtractorTrainer(
-    #     extractor=extractor,
-    #     base_model=model,
-    #     loss_fn=loss_fn,
-    #     optimizer=optimizer,
-    #     device=device
-    # )
-    # trainer.train(
-    #     dataset=triplet_dataset, 
-    #     epochs=exp_cfg.get("epochs", 2), 
-    #     batch_size=exp_cfg.get("batch_size", 8)
-    # )
+    print(f"--- 训练特征提取器 ---")
+    triplet_dataset = TripletDataset(original_dataset=dst_train, sample_pools=sample_pools)
+    optimizer = AdamW(extractor.parameters(), lr=exp_cfg.get("lr", 1e-4))
+    trainer = FeatureExtractorTrainer(
+        extractor=extractor,
+        base_model=model,
+        tokenizer=tokenizer, 
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+        device=device
+    )
+    trainer.train(
+        dataset=triplet_dataset, 
+        epochs=exp_cfg.get("epochs", 2), 
+        batch_size=exp_cfg.get("batch_size", 8)
+    )
 
+    # 使用训练好的 Extractor 进行 Top-K 检索
+    print("--- 正在使用训练好的 Extractor 检索 Top-1 ---")
+    retriever = TopKSampler(
+        extractor=extractor,
+        tokenizer=tokenizer,
+        device=device
+    )
+    # 在整个验证集上运行检索
+    top_1_samples = retriever.find_top_k_for_each_query(dst_val, k=1, batch_size=32)
+    oneshot_final_score = oneshot_sampler.eval(dst_val, top_1_samples)
 
-
+    # 输出统计结果
+    zeroshot_avg_score = np.mean(list(zeroshot_scores.values()))
+    print("\n" + "="*50)
+    print(f"0-shot 平均分数: {zeroshot_avg_score:.4f}")
+    print(f"使用检索示例后的 One-shot 平均分数: {oneshot_final_score:.4f}")
+    print(f"提升的性能为: {oneshot_final_score - zeroshot_avg_score:.4f}")
+    print("="*50 + "\n")
 
 
 

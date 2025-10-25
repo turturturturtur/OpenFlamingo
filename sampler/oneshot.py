@@ -168,3 +168,58 @@ class OneShotSampler:
 
         print(f"--- 样本挖掘完成！共处理了 {len(sample_pools)} 个查询。 ---")
         return sample_pools
+
+    @torch.no_grad()
+    def eval(self, dataset: Dataset, retrieved_samples: dict):
+        """
+        评估使用检索到的 one-shot 示例后的模型性能。
+
+        Args:
+            dataset (Dataset): 完整的评估数据集。
+            retrieved_samples (dict): 一个字典，映射 query_id 到一个
+                                      只包含正样本ID的列表。
+                                      例如: {query_id_1: [pos_ex_id_1], ...}
+
+        Returns:
+            float: 在所有提供了有效示例的查询上的平均 VQA Accuracy。
+        """
+        print("--- 开始评估 One-shot 性能 ---")
+        
+        # 创建一个从 question_id 到数据集索引的映射，以便快速查找
+        q_id_to_idx = {dataset[i]['question_id']: i for i in range(len(dataset))}
+        
+        all_scores = []
+
+        for query_id, example_ids in tqdm(retrieved_samples.items(), desc="Evaluating One-shot"):
+            # 确保查询和示例都在数据集中
+            if query_id not in q_id_to_idx:
+                continue
+            
+            # 我们只使用第一个检索到的示例 (top-1)
+            if not example_ids:
+                continue # 如果没有找到示例，则跳过
+            example_id = example_ids[0]
+
+            if example_id not in q_id_to_idx:
+                continue
+
+            # 获取查询和示例的完整数据
+            query_data = dataset[q_id_to_idx[query_id]]
+            example_data = dataset[q_id_to_idx[example_id]]
+
+            # 执行 one-shot 推理
+            prediction = self._run_one_shot_inference(
+                example_image=example_data['image'],
+                example_answer=example_data['gt_answer'],
+                query_image=query_data['image'],
+                query_question=query_data['question']
+            )
+
+            # 计算并记录分数
+            score = self._calculate_vqa_accuracy(prediction, query_data['all_answers'])
+            all_scores.append(score)
+
+        # 计算并返回平均分
+        avg_score = np.mean(all_scores) if all_scores else 0.0
+        print(f"--- One-shot 评估完成！在 {len(all_scores)} 个样本上的平均准确率: {avg_score:.4f} ---")
+        return avg_score

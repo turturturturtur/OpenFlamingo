@@ -75,8 +75,26 @@ class MLP(nn.Module):
 
 @MODEL.register("extractor")
 class Extractor(nn.Module):
-    def __init__(self, dim_attn1=1024, dim_attn2=512, hidden_layer=256, num_heads=8, output_dim=128, qkv_bias=False, attn_drop=0., proj_drop=0.):
+    def __init__(
+        self,
+        vis_dim=768,
+        txt_dim=2048,
+        dim_attn1=1024,
+        dim_attn2=512,
+        hidden_layer=256,
+        num_heads=8,
+        output_dim=128,
+        qkv_bias=False,
+        attn_drop=0.,
+        proj_drop=0.
+    ):
         super().__init__()
+
+        # --- 新增：对齐视觉/文本维度到同一空间 ---
+        self.proj_vis = nn.Linear(vis_dim, dim_attn1)
+        self.proj_txt = nn.Linear(txt_dim, dim_attn1)
+
+        # --- 原有注意力结构 ---
         self.attention1 = Attention(dim_attn1, num_heads, qkv_bias, attn_drop, proj_drop)
         self.attention2 = Attention(dim_attn2, num_heads, qkv_bias, attn_drop, proj_drop)
         self.gelu = nn.GELU()
@@ -84,26 +102,30 @@ class Extractor(nn.Module):
         self.mlp = MLP(in_features=dim_attn2, hidden_features=hidden_layer, out_features=output_dim, drop=proj_drop)
         self.layernorm = nn.LayerNorm(dim_attn2)
 
-    def forward(self, x, mask=None, mask_location=None):
-        # 输入 x 形状: [B, N, dim_attn1]
-        
+    def forward(self, vis_feat, txt_feat, mask=None, mask_location=None):
+        """
+        vis_feat: [B, vis_dim]       图像全局向量
+        txt_feat: [B, T, txt_dim]    文本 token 序列
+        """
+
+        # --- Step 1: 维度对齐 ---
+        vis_feat = self.proj_vis(vis_feat).unsqueeze(1)    # [B,1,dim_attn1]
+        txt_feat = self.proj_txt(txt_feat)                 # [B,T,dim_attn1]
+
+        # --- Step 2: 拼接 ---
+        x = torch.cat([vis_feat, txt_feat], dim=1)         # [B, 1+T, dim_attn1]
+
+        # --- Step 3: 两层注意力提取 ---
         x = self.attention1(x, mask, mask_location)
         x = self.gelu(x)
-        x = self.linear(x)
-        # x 形状: [B, N, dim_attn2]
-        
+        x = self.linear(x)                                 # [B, 1+T, dim_attn2]
         x = self.attention2(x, mask, mask_location)
-        x = self.layernorm(x)
-        # x 形状: [B, N, dim_attn2]
+        x = self.layernorm(x)                              # [B, 1+T, dim_attn2]
 
-        # --- [关键修改] 在这里进行池化操作 ---
-        # 将一个批次的特征序列，通过在序列维度(dim=1)上取平均，
-        # 聚合成一个批次的单一特征向量。
-        x_pooled = x.mean(dim=1)
-        # x_pooled 形状: [B, dim_attn2]
-        
-        # 现在可以将正确的二维张量喂给 MLP
-        x = self.mlp(x_pooled)
-        # 输出 x 形状: [B, output_dim]
-        
-        return x
+        # --- Step 4: 池化得到句向量 ---
+        x_pooled = x.mean(dim=1)                           # [B, dim_attn2]
+
+        # --- Step 5: MLP 输出最终特征 ---
+        x_out = self.mlp(x_pooled)                         # [B, output_dim]
+
+        return x_out

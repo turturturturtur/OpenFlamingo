@@ -5,6 +5,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import random
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import open_clip
 
 class TripletDataset(Dataset):
     """
@@ -39,58 +41,92 @@ class TripletDataset(Dataset):
         d_pos_idx = self.q_id_to_idx[d_pos_id]
         d_neg_idx = self.q_id_to_idx[d_neg_id]
         
-        return (
-            self.original_dataset[q_idx]['image'],
-            self.original_dataset[d_pos_idx]['image'],
-            self.original_dataset[d_neg_idx]['image']
-        )
+        q_data = self.original_dataset[q_idx]
+        d_pos_data = self.original_dataset[d_pos_idx]
+        d_neg_data = self.original_dataset[d_neg_idx]
+        
+        # [修改] 返回三元组的所有图像和问题
+        return {
+            'q': (q_data['image'], q_data['question']),
+            'd_pos': (d_pos_data['image'], d_pos_data['question']),
+            'd_neg': (d_neg_data['image'], d_neg_data['question'])
+        }
 
 class FeatureExtractorTrainer:
-    """
-    Handles the training loop for the feature extractor model.
-    """
-    def __init__(self, extractor, base_model, loss_fn, optimizer, device="cuda"):
+    def __init__(self, extractor, base_model, tokenizer, loss_fn, optimizer, device="cuda"):
         self.extractor = extractor
         self.base_model = base_model
+        self.tokenizer = tokenizer # [新增] 需要分词器来处理文本
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.device = device
+        self.text_feature_encoder = AutoModelForCausalLM.from_pretrained(
+            "anas-awadalla/mpt-1b-redpajama-200b",
+            trust_remote_code=True,
+        ).to(device)
+        self.text_feature_encoder.eval()
         
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
 
-    def _get_base_features(self, images):
+    def _get_multimodal_features(self, images, texts):
         """
-        Extracts post-perceiver features from the frozen base model.
-        This is the "more optimal" approach.
+        [新版本] 从冻结的 base_model 中提取视觉和文本特征。
         """
-        # Ensure images are on the correct device
+        # --- 1. 提取视觉特征 ---
         images = images.to(self.device)
+        vision_encoder, _, image_processor = open_clip.create_model_and_transforms(
+            "ViT-L-14", pretrained="openai"
+        )
+        vision_encoder.to(self.device)
+        vision_embed = vision_encoder.encode_image(images, normalize=True)
+
+        # --- 2. 提取文本特征 ---
+        self.tokenizer.padding_side = "left"
+        text_tokens = self.tokenizer(
+            list(texts),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=64
+        ).to(self.device)
+
+        # 【遵从你的示例】调用独立的 text_encoder
+        out = self.text_feature_encoder(
+            **text_tokens,
+            output_hidden_states=True,
+            return_dict=True, # return_dict is the default and good practice
+            use_cache=False
+        )
         
-        # 1. Get raw patch features from the vision encoder
-        vision_x = self.base_model.vision_encoder(images)[0]
-        
-        # 2. Resample features through the perceiver
-        vision_x = self.base_model.perceiver(vision_x)
-        
-        return vision_x
+        # 【遵从你的示例】取最后一层的隐藏状态
+        text_embeds = out.hidden_states[-1]
+
+        return vision_embed, text_embeds
 
     def train_one_epoch(self, dataloader):
         self.extractor.train()
         total_loss = 0.0
         
-        for q_images, d_pos_images, d_neg_images in tqdm(dataloader, desc="Training Epoch"):
+        for batch in tqdm(dataloader, desc="Training Epoch"):
+            # [修改] 解包图像和文本
+            q_images, q_texts = batch['q']
+            d_pos_images, d_pos_texts = batch['d_pos']
+            d_neg_images, d_neg_texts = batch['d_neg']
+            
             with torch.no_grad():
-                base_q_features = self._get_base_features(q_images)
-                base_d_pos_features = self._get_base_features(d_pos_images)
-                base_d_neg_features = self._get_base_features(d_neg_images)
+                # 分别提取三组特征
+                base_q_vis, base_q_txt = self._get_multimodal_features(q_images, q_texts)
+                base_d_pos_vis, base_d_pos_txt = self._get_multimodal_features(d_pos_images, d_pos_texts)
+                base_d_neg_vis, base_d_neg_txt = self._get_multimodal_features(d_neg_images, d_neg_texts)
             
             self.optimizer.zero_grad()
             
-            q_features = self.extractor(base_q_features)
-            d_pos_features = self.extractor(base_d_pos_features)
-            d_neg_features = self.extractor(base_d_neg_features)
+            # [修改] 将两种模态的特征都输入到 extractor 中
+            q_features = self.extractor(base_q_vis, base_q_txt)
+            d_pos_features = self.extractor(base_d_pos_vis, base_d_pos_txt)
+            d_neg_features = self.extractor(base_d_neg_vis, base_d_neg_txt)
             
             loss = self.loss_fn(q_features, d_pos_features, d_neg_features)
             
